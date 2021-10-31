@@ -1,3 +1,5 @@
+// Package metrics wraps prometheus.Metrics making it a bit easier to manage counters and gauges and also providing
+// a mechanism by which all changes are communicated out via channels.
 package metrics
 
 import (
@@ -8,11 +10,17 @@ import (
 )
 
 // New creates and returns a new instance of Metrics.
-func New() Metrics {
+func New(opts ...Option) Metrics {
+	collector := &optionsCollector{}
+	for _, opt := range opts {
+		opt(collector)
+	}
 	return &metricsGuard{
-		counterMap: map[string]prometheus.Counter{},
-		gaugeMap:   map[string]prometheus.Gauge{},
+		counterMap: map[string]Counter{},
+		gaugeMap:   map[string]Gauge{},
 		mux:        &sync.Mutex{},
+		countChan:  collector.countChan,
+		gaugeChan:  collector.gaugeChan,
 	}
 }
 
@@ -20,22 +28,24 @@ func New() Metrics {
 type Metrics interface {
 	// Counter returns a counter for the given name and labels. Is useful in situation where the counter should be
 	// increases by some other value that 1.
-	Counter(name string, constLabels map[string]string) prometheus.Counter
+	Counter(name string, constLabels map[string]string) Counter
 
 	// IncCounter increases the counter with the given name and labels by 1.
 	IncCounter(name string, constLabels map[string]string)
 
 	// Gauge returns a gauge with the given name.
-	Gauge(name string) prometheus.Gauge
+	Gauge(name string) Gauge
 
 	// SetGauge sets the given value in the gauge with the given name.
 	SetGauge(name string, v int)
 }
 
 type metricsGuard struct {
-	counterMap map[string]prometheus.Counter
-	gaugeMap   map[string]prometheus.Gauge
+	counterMap map[string]Counter
+	gaugeMap   map[string]Gauge
 	mux        *sync.Mutex
+	countChan  chan<- CountChange
+	gaugeChan  chan<- GaugeChange
 }
 
 func (g *metricsGuard) SetGauge(name string, v int) {
@@ -43,7 +53,7 @@ func (g *metricsGuard) SetGauge(name string, v int) {
 	gg.Set(float64(v))
 }
 
-func (g *metricsGuard) Gauge(name string) prometheus.Gauge {
+func (g *metricsGuard) Gauge(name string) Gauge {
 	if gg, ok := g.gaugeMap[name]; ok {
 		return gg
 	}
@@ -55,9 +65,14 @@ func (g *metricsGuard) Gauge(name string) prometheus.Gauge {
 		return gg
 	}
 
-	gg := promauto.NewGauge(prometheus.GaugeOpts{
-		Name:        name,
-	})
+	gg := &gauge{
+		name:    name,
+		labels:  nil,
+		changes: g.gaugeChan,
+		inner: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: name,
+		}),
+	}
 
 	g.gaugeMap[name] = gg
 
@@ -69,7 +84,7 @@ func (g *metricsGuard) IncCounter(name string, constLabels map[string]string) {
 	c.Inc()
 }
 
-func (g *metricsGuard) Counter(name string, constLabels map[string]string) prometheus.Counter {
+func (g *metricsGuard) Counter(name string, constLabels map[string]string) Counter {
 	key := metricsKey(name, constLabels)
 	if c, ok := g.counterMap[key]; ok {
 		return c
@@ -82,10 +97,15 @@ func (g *metricsGuard) Counter(name string, constLabels map[string]string) prome
 		return c
 	}
 
-	c := promauto.NewCounter(prometheus.CounterOpts{
-		Name:        name,
-		ConstLabels: constLabels,
-	})
+	c := &counter{
+		name:    name,
+		labels:  constLabels,
+		changes: g.countChan,
+		inner: promauto.NewCounter(prometheus.CounterOpts{
+			Name:        name,
+			ConstLabels: constLabels,
+		}),
+	}
 
 	g.counterMap[key] = c
 
