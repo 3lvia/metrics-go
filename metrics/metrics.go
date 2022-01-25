@@ -85,14 +85,10 @@ func (g *metricsGuard) IncCounter(name string, constLabels map[string]string) {
 }
 
 func (g *metricsGuard) Counter(name string, constLabels map[string]string) Counter {
-	key := metricsKey(name, constLabels)
-	if c, ok := g.counterMap[key]; ok {
-		return c
-	}
-
 	g.mux.Lock()
 	defer g.mux.Unlock()
 
+	key := metricsKey(name, constLabels)
 	if c, ok := g.counterMap[key]; ok {
 		return c
 	}
